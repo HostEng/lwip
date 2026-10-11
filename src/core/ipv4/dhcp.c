@@ -140,6 +140,14 @@
 #define DHCP_CREATE_RAND_XID        1
 #endif
 
+/* Product ports that retain the last DHCP lease may initialize the netif
+ * with that address before calling dhcp_start().  Request it through the
+ * RFC 2131 INIT-REBOOT path instead of discarding it and starting SELECTING.
+ * Disabled by default so upstream lwIP behavior is unchanged. */
+#ifndef LWIP_DHCP_REBOOT_FROM_NETIF_ADDR
+#define LWIP_DHCP_REBOOT_FROM_NETIF_ADDR 0
+#endif
+
 /** Default for DHCP_GLOBAL_XID is 0xABCD0000
  * This can be changed by defining DHCP_GLOBAL_XID and DHCP_GLOBAL_XID_HEADER, e.g.
  *  \#define DHCP_GLOBAL_XID_HEADER "stdlib.h"
@@ -809,10 +817,18 @@ dhcp_start(struct netif *netif)
   struct dhcp *dhcp;
   err_t result;
   u8_t saved_flags;
+#if LWIP_DHCP_REBOOT_FROM_NETIF_ADDR
+  ip4_addr_t reboot_addr;
+  u8_t rebooting;
+#endif
 
   LWIP_ASSERT_CORE_LOCKED();
   LWIP_ERROR("netif != NULL", (netif != NULL), return ERR_ARG;);
   LWIP_ERROR("netif is not up, old style port?", netif_is_up(netif), return ERR_ARG;);
+#if LWIP_DHCP_REBOOT_FROM_NETIF_ADDR
+  rebooting = (u8_t)!ip4_addr_isany_val(*netif_ip4_addr(netif));
+  ip4_addr_copy(reboot_addr, *netif_ip4_addr(netif));
+#endif
   dhcp = netif_dhcp_data(netif);
   LWIP_DEBUGF(DHCP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, ("dhcp_start(netif=%p) %c%c%"U16_F"\n", (void *)netif, netif->name[0], netif->name[1], (u16_t)netif->num));
 
@@ -865,6 +881,15 @@ dhcp_start(struct netif *netif)
   }
   dhcp->pcb_allocated = 1;
 
+#if LWIP_DHCP_REBOOT_FROM_NETIF_ADDR
+  if (rebooting) {
+    ip4_addr_t zero;
+    ip4_addr_set_zero(&zero);
+    ip4_addr_copy(dhcp->offered_ip_addr, reboot_addr);
+    netif_set_addr(netif, &zero, &zero, &zero);
+  }
+#endif
+
   if (!netif_is_link_up(netif)) {
     /* set state INIT and wait for dhcp_network_changed() to call dhcp_discover() */
     dhcp_set_state(dhcp, DHCP_STATE_INIT);
@@ -872,7 +897,11 @@ dhcp_start(struct netif *netif)
   }
 
   /* (re)start the DHCP negotiation */
+#if LWIP_DHCP_REBOOT_FROM_NETIF_ADDR
+  result = rebooting ? dhcp_reboot(netif) : dhcp_discover(netif);
+#else
   result = dhcp_discover(netif);
+#endif
   if (result != ERR_OK) {
     /* free resources allocated above */
     dhcp_release_and_stop(netif);
