@@ -75,6 +75,55 @@
 
 #define ACD_TICKS_PER_SECOND  (1000 / ACD_TMR_INTERVAL)
 
+/* Products may override the RFC 5227 timings in lwipopts.h.  EtherNet/IP,
+ * for example, defines shorter ACD timings in CIP Volume 2 Appendix F. */
+#ifndef ACD_PROBE_WAIT_MS
+#define ACD_PROBE_WAIT_MS          (PROBE_WAIT * 1000U)
+#endif
+#ifndef ACD_PROBE_MIN_MS
+#define ACD_PROBE_MIN_MS           (PROBE_MIN * 1000U)
+#endif
+#ifndef ACD_PROBE_MAX_MS
+#define ACD_PROBE_MAX_MS           (PROBE_MAX * 1000U)
+#endif
+#ifndef ACD_PROBE_NUM
+#define ACD_PROBE_NUM              PROBE_NUM
+#endif
+#ifndef ACD_ANNOUNCE_WAIT_MS
+#define ACD_ANNOUNCE_WAIT_MS       (ANNOUNCE_WAIT * 1000U)
+#endif
+#ifndef ACD_ANNOUNCE_INTERVAL_MS
+#define ACD_ANNOUNCE_INTERVAL_MS   (ANNOUNCE_INTERVAL * 1000U)
+#endif
+#ifndef ACD_DEFEND_INTERVAL_MS
+#define ACD_DEFEND_INTERVAL_MS     (DEFEND_INTERVAL * 1000U)
+#endif
+#ifndef ACD_ONGOING_PROBE_MIN_MS
+#define ACD_ONGOING_PROBE_MIN_MS   0U
+#endif
+#ifndef ACD_ONGOING_PROBE_MAX_MS
+#define ACD_ONGOING_PROBE_MAX_MS   0U
+#endif
+
+#define ACD_MS_TO_TICKS(ms) \
+  (((ms) + ACD_TMR_INTERVAL - 1U) / ACD_TMR_INTERVAL)
+#define ACD_PROBE_WAIT_TICKS \
+  ACD_MS_TO_TICKS(ACD_PROBE_WAIT_MS)
+#define ACD_PROBE_MIN_TICKS \
+  ACD_MS_TO_TICKS(ACD_PROBE_MIN_MS)
+#define ACD_PROBE_MAX_TICKS \
+  ACD_MS_TO_TICKS(ACD_PROBE_MAX_MS)
+#define ACD_ANNOUNCE_WAIT_TICKS \
+  ACD_MS_TO_TICKS(ACD_ANNOUNCE_WAIT_MS)
+#define ACD_ANNOUNCE_INTERVAL_TICKS \
+  ACD_MS_TO_TICKS(ACD_ANNOUNCE_INTERVAL_MS)
+#define ACD_DEFEND_INTERVAL_TICKS \
+  ACD_MS_TO_TICKS(ACD_DEFEND_INTERVAL_MS)
+#define ACD_ONGOING_PROBE_MIN_TICKS \
+  ACD_MS_TO_TICKS(ACD_ONGOING_PROBE_MIN_MS)
+#define ACD_ONGOING_PROBE_MAX_TICKS \
+  ACD_MS_TO_TICKS(ACD_ONGOING_PROBE_MAX_MS)
+
 /* Define good random function (LWIP_RAND) in lwipopts.h */
 #ifdef LWIP_RAND
 #define LWIP_ACD_RAND(netif, acd)    LWIP_RAND()
@@ -92,12 +141,39 @@
 #endif /* LWIP_RAND */
 
 
-#define ACD_RANDOM_PROBE_WAIT(netif, acd) (LWIP_ACD_RAND(netif, acd) % \
-                                    (PROBE_WAIT * ACD_TICKS_PER_SECOND))
+static u16_t
+acd_random_probe_wait(struct netif *netif, struct acd *acd)
+{
+  u32_t ticks = ACD_PROBE_WAIT_TICKS;
+  return ticks == 0U ? 0U : (u16_t)(LWIP_ACD_RAND(netif, acd) % ticks);
+}
 
-#define ACD_RANDOM_PROBE_INTERVAL(netif, acd) ((LWIP_ACD_RAND(netif, acd) % \
-                                    ((PROBE_MAX - PROBE_MIN) * ACD_TICKS_PER_SECOND)) + \
-                                    (PROBE_MIN * ACD_TICKS_PER_SECOND ))
+static u16_t
+acd_random_probe_interval(struct netif *netif, struct acd *acd)
+{
+  u32_t minimum = ACD_PROBE_MIN_TICKS;
+  u32_t maximum = ACD_PROBE_MAX_TICKS;
+  if (maximum <= minimum) {
+    return (u16_t)minimum;
+  }
+  return (u16_t)((LWIP_ACD_RAND(netif, acd) % (maximum - minimum)) +
+                 minimum);
+}
+
+static u16_t
+acd_random_ongoing_probe_interval(struct netif *netif, struct acd *acd)
+{
+  u32_t minimum = ACD_ONGOING_PROBE_MIN_TICKS;
+  u32_t maximum = ACD_ONGOING_PROBE_MAX_TICKS;
+  if (minimum == 0U || maximum == 0U) {
+    return 0U;
+  }
+  if (maximum <= minimum) {
+    return (u16_t)minimum;
+  }
+  return (u16_t)((LWIP_ACD_RAND(netif, acd) %
+                  (maximum - minimum + 1U)) + minimum);
+}
 
 /* Function definitions */
 static void acd_restart(struct netif *netif, struct acd *acd);
@@ -195,7 +271,7 @@ acd_start(struct netif *netif, struct acd *acd, ip4_addr_t ipaddr)
   ip4_addr_copy(acd->ipaddr, ipaddr);
   acd->state = ACD_STATE_PROBE_WAIT;
 
-  acd->ttw = (u16_t)(ACD_RANDOM_PROBE_WAIT(netif, acd));
+  acd->ttw = acd_random_probe_wait(netif, acd);
 
   return result;
 }
@@ -265,17 +341,17 @@ acd_tmr(void)
             LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE,
                         ("acd_tmr() PROBING Sent Probe\n"));
             acd->sent_num++;
-            if (acd->sent_num >= PROBE_NUM) {
+            if (acd->sent_num >= ACD_PROBE_NUM) {
               /* Switch to ANNOUNCE_WAIT: last probe is sent*/
               acd->state = ACD_STATE_ANNOUNCE_WAIT;
 
               acd->sent_num = 0;
 
               /* calculate time to wait before announcing */
-              acd->ttw = (u16_t)(ANNOUNCE_WAIT * ACD_TICKS_PER_SECOND);
+              acd->ttw = (u16_t)ACD_ANNOUNCE_WAIT_TICKS;
             } else {
               /* calculate time to wait to next probe */
-              acd->ttw = (u16_t)(ACD_RANDOM_PROBE_INTERVAL(netif, acd));
+              acd->ttw = acd_random_probe_interval(netif, acd);
             }
           }
           break;
@@ -298,13 +374,13 @@ acd_tmr(void)
             etharp_acd_announce(netif, &acd->ipaddr);
             LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE,
                         ("acd_tmr() ANNOUNCING Sent Announce\n"));
-            acd->ttw = ANNOUNCE_INTERVAL * ACD_TICKS_PER_SECOND;
+            acd->ttw = (u16_t)ACD_ANNOUNCE_INTERVAL_TICKS;
             acd->sent_num++;
 
             if (acd->sent_num >= ANNOUNCE_NUM) {
               acd->state = ACD_STATE_ONGOING;
               acd->sent_num = 0;
-              acd->ttw = 0;
+              acd->ttw = acd_random_ongoing_probe_interval(netif, acd);
               LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE,
                     ("acd_tmr(): changing state to ONGOING: %"U16_F".%"U16_F".%"U16_F".%"U16_F"\n",
                      ip4_addr1_16(&acd->ipaddr), ip4_addr2_16(&acd->ipaddr),
@@ -313,6 +389,15 @@ acd_tmr(void)
               /* finally, let acd user know that the address is good and can be used */
               acd->acd_conflict_callback(netif, ACD_IP_OK);
             }
+          }
+          break;
+
+        case ACD_STATE_ONGOING:
+          if (ACD_ONGOING_PROBE_MIN_TICKS != 0U && acd->ttw == 0U) {
+            etharp_acd_probe(netif, &acd->ipaddr);
+            acd->ttw = acd_random_ongoing_probe_interval(netif, acd);
+            LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE,
+                        ("acd_tmr() ONGOING Sent Probe\n"));
           }
           break;
 
@@ -478,7 +563,7 @@ acd_handle_arp_conflict(struct netif *netif, struct acd *acd)
       LWIP_DEBUGF(ACD_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE,
           ("acd_handle_arp_conflict(): we are defending, send ARP Announce\n"));
       etharp_acd_announce(netif, &acd->ipaddr);
-      acd->lastconflict = DEFEND_INTERVAL * ACD_TICKS_PER_SECOND;
+      acd->lastconflict = (u16_t)ACD_DEFEND_INTERVAL_TICKS;
     }
   }
 }
